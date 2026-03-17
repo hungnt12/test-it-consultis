@@ -1,49 +1,26 @@
 import { NextRequest, NextResponse } from "next/server";
-import {
-  POKEAPI_BASE,
-  LIMIT_PER_PAGE,
-  POKEAPI_SHOWDOWN_SPRITE_BASE,
-} from "@/lib/constants";
-import type {
-  PokeApiListResponse,
-  PokeApiTypeDetailResponse,
-  PokemonListItem,
-  ApiPokemonListPayload,
-} from "@/lib/types/pokemon";
+import { LIMIT_PER_PAGE, POKEAPI_SHOWDOWN_SPRITE_BASE } from "@/lib/constants";
+import type { PokemonListItem, ApiPokemonListPayload } from "@/lib/types/pokemon";
 import { getOrFetch } from "@/lib/cache";
+import { pokedexClient } from "@/lib/pokedexClient";
 
 function extractIdFromUrl(url: string): number {
   const match = url.match(/\/(\d+)\/?$/);
   return match ? parseInt(match[1], 10) : 0;
 }
 
-async function safeFetchJson<T>(url: string): Promise<T | null> {
-  const startedAt = Date.now();
-  console.log("[api/pokemon] -> external request", { url });
+async function getPokemonList(limit: number, offset: number) {
   try {
-    const res = await fetch(url);
-    const duration = Date.now() - startedAt;
-    if (!res.ok) {
-      console.warn("[api/pokemon] <- external non-ok", {
-        url,
-        status: res.status,
-        durationMs: duration,
-      });
-      return null;
-    }
-    const json = (await res.json()) as T;
-    console.log("[api/pokemon] <- external success", {
-      url,
-      durationMs: duration,
-    });
-    return json;
-  } catch (error) {
-    const duration = Date.now() - startedAt;
-    console.error("[api/pokemon] <- external error", {
-      url,
-      durationMs: duration,
-      error,
-    });
+    return await pokedexClient.getPokemonList(limit, offset);
+  } catch {
+    return null;
+  }
+}
+
+async function getTypeByName(name: string) {
+  try {
+    return await pokedexClient.getTypeByName(name);
+  } catch {
     return null;
   }
 }
@@ -65,14 +42,11 @@ function buildPokemonListItems(
   });
 }
 
-/** Lấy list không filter: PokeAPI /pokemon?limit&offset rồi fetch detail từng item */
 async function fetchListNoFilter(
   limit: number,
   offset: number
 ): Promise<ApiPokemonListPayload> {
-  const data = await safeFetchJson<PokeApiListResponse>(
-    `${POKEAPI_BASE}/pokemon?limit=${limit}&offset=${offset}`
-  );
+  const data = await getPokemonList(limit, offset);
   if (!data) {
     return { count: 0, results: [] };
   }
@@ -92,14 +66,13 @@ async function fetchListByTypes(
 
   const typeResponses = await Promise.all(
     typeNames.map((name) =>
-      getOrFetch<PokeApiTypeDetailResponse | null>(
+      getOrFetch<any | null>(
         `pokeapi:type:${name}`,
-        async () => safeFetchJson<PokeApiTypeDetailResponse>(`${POKEAPI_BASE}/type/${name}`)
+        async () => getTypeByName(name)
       )
     )
   );
 
-  // Xây map name -> { url, count } để lấy giao (intersection) giữa các type
   const counts = new Map<string, { url: string; count: number }>();
   for (const tr of typeResponses) {
     if (!tr) continue;
@@ -141,36 +114,17 @@ export async function GET(request: NextRequest) {
       Math.max(1, parseInt(searchParams.get("limit") ?? String(LIMIT_PER_PAGE), 10))
     );
 
-    console.log("[api/pokemon] incoming request", {
-      url: request.url,
-      page,
-      limit,
-      typesParam,
-    });
-
     if (typesParam && typesParam.trim()) {
       const typeNames = typesParam
         .split(",")
         .map((t) => t.trim().toLowerCase())
         .filter(Boolean);
-      console.log("[api/pokemon] filter by types", { typeNames });
       const payload = await fetchListByTypes(typeNames, page, limit);
-      console.log("[api/pokemon] response for types", {
-        total: payload.count,
-        page,
-        pageSize: limit,
-      });
       return NextResponse.json(payload);
     }
 
     const offset = (page - 1) * limit;
     const payload = await fetchListNoFilter(limit, offset);
-    console.log("[api/pokemon] response no filter", {
-      total: payload.count,
-      page,
-      pageSize: limit,
-      offset,
-    });
     return NextResponse.json(payload);
   } catch (e) {
     console.error("[api/pokemon]", e);
